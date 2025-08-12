@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.db import transaction
 from .models import Post, SubPost
 
 
@@ -12,6 +13,7 @@ class SubPostSerializer(serializers.ModelSerializer):
 class PostSerializer(serializers.ModelSerializer):
     subposts = SubPostSerializer(many=True, required=False)
     likes_count = serializers.IntegerField(source='likes.count', read_only=True)
+    author = serializers.ReadOnlyField(source='author.id')  # now read-only
 
     class Meta:
         model = Post
@@ -20,43 +22,48 @@ class PostSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at', 'subposts',
             'likes_count', 'views_count'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'likes_count', 'views_count']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'likes_count', 'views_count', 'author']
 
     def create(self, validated_data):
         subposts_data = validated_data.pop('subposts', [])
-        post = Post.objects.create(**validated_data)
+        request = self.context.get('request')
+        post = Post.objects.create(author=request.user, **validated_data)
         for subpost_data in subposts_data:
             SubPost.objects.create(post=post, **subpost_data)
         return post
 
+    @transaction.atomic
     def update(self, instance, validated_data):
         subposts_data = validated_data.pop('subposts', None)
 
-        # Update main post fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
 
         if subposts_data is not None:
-            existing_ids = [sp.id for sp in instance.subposts.all()]
+            existing_subposts = {sp.id: sp for sp in instance.subposts.all()}
             sent_ids = [sp.get('id') for sp in subposts_data if sp.get('id')]
 
-            # Delete subposts not in request
-            for subpost in instance.subposts.all():
-                if subpost.id not in sent_ids:
-                    subpost.delete()
+            # Delete missing
+            for sub_id in set(existing_subposts.keys()) - set(sent_ids):
+                existing_subposts[sub_id].delete()
 
-            # Create or update subposts
-            for subpost_data in subposts_data:
-                subpost_id = subpost_data.get('id')
-                if subpost_id and subpost_id in existing_ids:
-                    # Update existing
-                    subpost_obj = SubPost.objects.get(id=subpost_id, post=instance)
-                    subpost_obj.title = subpost_data.get('title', subpost_obj.title)
-                    subpost_obj.body = subpost_data.get('body', subpost_obj.body)
-                    subpost_obj.save()
+            # Create & update in batches
+            to_create = []
+            to_update = []
+            for sub_data in subposts_data:
+                sub_id = sub_data.get('id')
+                if sub_id and sub_id in existing_subposts:
+                    sub_obj = existing_subposts[sub_id]
+                    sub_obj.title = sub_data.get('title', sub_obj.title)
+                    sub_obj.body = sub_data.get('body', sub_obj.body)
+                    to_update.append(sub_obj)
                 else:
-                    # Create new
-                    SubPost.objects.create(post=instance, **subpost_data)
+                    to_create.append(SubPost(post=instance, **sub_data))
+
+            if to_update:
+                SubPost.objects.bulk_update(to_update, ['title', 'body'])
+            if to_create:
+                SubPost.objects.bulk_create(to_create)
 
         return instance

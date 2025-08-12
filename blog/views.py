@@ -1,9 +1,9 @@
-from django.db.models import F
+from django.db import transaction
+from django.utils.timezone import now
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticatedOrReadOnly
-
 from .models import Post, SubPost
 from .serializers import PostSerializer, SubPostSerializer
 
@@ -17,11 +17,12 @@ class PostViewSet(viewsets.ModelViewSet):
     def bulk_create(self, request):
         serializer = self.get_serializer(data=request.data, many=True)
         serializer.is_valid(raise_exception=True)
-        self.perform_bulk_create(serializer.validated_data)
+        self.perform_bulk_create(serializer.validated_data, request.user)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-    def perform_bulk_create(self, validated_data_list):
-        posts = [Post(**item) for item in validated_data_list]
+    def perform_bulk_create(self, validated_data_list, user):
+        timestamp = now()
+        posts = [Post(author=user, created_at=timestamp, updated_at=timestamp, **item) for item in validated_data_list]
         Post.objects.bulk_create(posts)
 
     @action(detail=True, methods=['post'])
